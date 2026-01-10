@@ -2,7 +2,6 @@ model/__pycache__
 out
 website/
 docs-minimind/
-dataset/lm_dataset.py
 .gitignore
 dataset/lora_identity.jsonl
 dataset/lora_medical.jsonl
