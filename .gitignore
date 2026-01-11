@@ -17,3 +17,5 @@ dataset/sft_mini_512.jsonl
 dataset/images/1.png
 dataset/images/dataset.jpg
 dataset/images/logo.png
+*.pth
+*.pyc
