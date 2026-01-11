@@ -1,3 +1,34 @@
+"""
+================================================================================
+                    MiniMind 预训练脚本 (Pre-training)
+================================================================================
+
+【什么是预训练】
+预训练是 LLM 训练的第一阶段，目标是让模型学习语言的基本规律:
+1. 语法结构 - 什么样的句子是合法的
+2. 语义关系 - 词语之间的含义关联  
+3. 世界知识 - 从大量文本中学习事实和常识
+
+【训练目标】
+因果语言模型目标 (Causal Language Modeling):
+给定文本 [t₁, t₂, ..., tₙ]，预测每个位置的下一个 token:
+Loss = -Σ log P(tᵢ | t₁, ..., tᵢ₋₁)
+
+【关键技术】
+1. 混合精度训练 (AMP): 加速训练并节省显存
+2. 梯度累积: 在显存有限时模拟大批量
+3. 梯度裁剪: 防止梯度爆炸
+4. 余弦学习率调度: 更好的收敛
+5. 分布式训练 (DDP): 多 GPU 加速
+
+【使用方法】
+单卡训练:
+    python train_pretrain.py --epochs 1 --batch_size 32
+
+多卡训练:
+    torchrun --nproc_per_node=4 train_pretrain.py --epochs 1 --batch_size 32
+"""
+
 import os
 import sys
 
@@ -21,36 +52,62 @@ warnings.filterwarnings('ignore')
 
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+    """
+    训练一个 epoch
+    
+    【核心训练循环】
+    for batch in data:
+        1. 前向传播: logits = model(X)
+        2. 计算损失: loss = CrossEntropy(logits, Y) 
+        3. 反向传播: loss.backward()
+        4. 梯度累积: 累积 N 步后更新
+        5. 梯度裁剪: 防止梯度爆炸
+        6. 参数更新: optimizer.step()
+    """
+    # 交叉熵损失，reduction='none' 以便手动处理 mask
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
+    
     for step, (X, Y, loss_mask) in enumerate(loader, start=start_step + 1):
+        # X: 输入 [B, L-1], Y: 目标 [B, L-1] (X 右移一位)
+        # loss_mask: 非 padding 位置为 1
         X = X.to(args.device)
         Y = Y.to(args.device)
         loss_mask = loss_mask.to(args.device)
+        
+        # 动态调整学习率 (余弦调度)
         lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
+        # 混合精度前向传播
         with autocast_ctx:
             res = model(X)
+            # 计算每个位置的交叉熵损失
             loss = loss_fct(
-                res.logits.view(-1, res.logits.size(-1)),
-                Y.view(-1)
-            ).view(Y.size())
+                res.logits.view(-1, res.logits.size(-1)),  # [B*L, vocab_size]
+                Y.view(-1)                                  # [B*L]
+            ).view(Y.size())  # [B, L]
 
+            # 应用 loss_mask，只在非 padding 位置计算损失
             logits_loss = (loss * loss_mask).sum() / loss_mask.sum()
+            # 添加 MoE 辅助损失 (负载均衡)
             loss = logits_loss + res.aux_loss
+            # 梯度累积: 损失除以累积步数
             loss = loss / args.accumulation_steps
 
+        # 反向传播 (使用 GradScaler 处理混合精度)
         scaler.scale(loss).backward()
 
+        # 每累积 N 步后更新参数
         if (step + 1) % args.accumulation_steps == 0:
             scaler.unscale_(optimizer)
+            # 梯度裁剪，防止梯度爆炸
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-
+            # 优化器更新参数
             scaler.step(optimizer)
             scaler.update()
-
+            # 清零梯度，set_to_none=True 更高效
             optimizer.zero_grad(set_to_none=True)
 
         if step % args.log_interval == 0 or step == iters - 1:
