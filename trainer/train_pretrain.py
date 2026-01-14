@@ -64,7 +64,31 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         5. 梯度裁剪: 防止梯度爆炸
         6. 参数更新: optimizer.step()
     """
-    # 交叉熵损失，reduction='none' 以便手动处理 mask
+    # ════════════════════════════════════════════════════════════════════════════
+    # 【什么是交叉熵 (Cross-Entropy)？】
+    # ════════════════════════════════════════════════════════════════════════════
+    #
+    # 【信息论起源】
+    # 交叉熵衡量两个概率分布之间的"距离":
+    #   H(p, q) = -Σ p(x) × log(q(x))
+    #   - p(x): 真实分布 (one-hot，正确词=1，其他=0)
+    #   - q(x): 模型预测 (softmax后的概率)
+    #
+    # 【在语言模型中】
+    # 例如预测"天气"的下一个词:
+    #   真实: p = [0, 0, ..., 1(很好), ..., 0]
+    #   预测: q = [0.1, 0.05, 0.3(很好), 0.15, ...]
+    #   交叉熵 = -log(0.3) = 1.2
+    #
+    # 【直觉】
+    #   预测概率 1.0 → loss = 0 (完美)
+    #   预测概率 0.5 → loss = 0.69
+    #   预测概率 0.01 → loss = 4.6 (很差)
+    #
+    # 【reduction='none'】
+    # 返回每个位置的loss，不取平均
+    # 这样可以用 loss_mask 手动过滤掉 padding 位置
+    # ════════════════════════════════════════════════════════════════════════════
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
     
@@ -75,7 +99,30 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         Y = Y.to(args.device)
         loss_mask = loss_mask.to(args.device)
         
-        # 动态调整学习率 (余弦调度)
+        # ════════════════════════════════════════════════════════════════════
+        # 【param_group 是什么？从哪来的？】
+        # ════════════════════════════════════════════════════════════════════
+        #
+        # 【来源】optimizer 创建时自动生成
+        #   optimizer = AdamW(model.parameters(), lr=0.001)
+        #   → optimizer.param_groups = [
+        #       {
+        #           'params': [所有模型参数的引用],
+        #           'lr': 0.001,           # 学习率
+        #           'betas': (0.9, 0.999), # Adam动量参数
+        #           'eps': 1e-8,           # 数值稳定性
+        #           'weight_decay': 0.01,  # 权重衰减
+        #       }
+        #     ]
+        #
+        # 【为什么是列表？】可以给不同层设置不同学习率:
+        #   optimizer = AdamW([
+        #       {'params': model.encoder.parameters(), 'lr': 1e-4},
+        #       {'params': model.decoder.parameters(), 'lr': 1e-3}
+        #   ])  → param_groups 有 2 个元素
+        #
+        # 【这里干嘛？】动态调整学习率，无需重建 optimizer
+        # ════════════════════════════════════════════════════════════════════
         lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
@@ -96,18 +143,35 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             # 梯度累积: 损失除以累积步数
             loss = loss / args.accumulation_steps
 
-        # 反向传播 (使用 GradScaler 处理混合精度)
+        # ════════════════════════════════════════════════════════════════════
+        # 【GradScaler 是干嘛的？】混合精度训练的梯度缩放器
+        # ════════════════════════════════════════════════════════════════════
+        #
+        # 【背景问题】
+        # float16 数值范围很小: 最小正数 ≈ 6×10⁻⁸
+        # 梯度可能非常小(如 1×10⁻⁸)，在 float16 中会变成 0！
+        # → 梯度消失，模型无法训练
+        #
+        # 【四步流程】
+        # 1. scale(loss): 放大 loss (如 ×65536)
+        #    → 反向传播时梯度也被放大，小梯度不会下溢
+        # 2. unscale_(optimizer): 恢复原始梯度大小
+        # 3. step(optimizer): 检查 inf/nan，无则更新参数
+        # 4. update(): 动态调整缩放因子
+        #
+        # 【流程图】
+        # loss=0.001 → scale() → 65.536 → backward()
+        #           → scaled_grads → unscale_() → real_grads
+        #           → clip → step() → update()
+        # ════════════════════════════════════════════════════════════════════
         scaler.scale(loss).backward()
 
-        # 每累积 N 步后更新参数
+        # 反向传播 (使用 GradScaler 处理混合精度)
         if (step + 1) % args.accumulation_steps == 0:
-            scaler.unscale_(optimizer)
-            # 梯度裁剪，防止梯度爆炸
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            # 优化器更新参数
-            scaler.step(optimizer)
-            scaler.update()
-            # 清零梯度，set_to_none=True 更高效
+            scaler.unscale_(optimizer)       # 恢复原始梯度
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)  # 梯度裁剪
+            scaler.step(optimizer)           # 检查后更新参数
+            scaler.update()                  # 调整缩放因子
             optimizer.zero_grad(set_to_none=True)
 
         if step % args.log_interval == 0 or step == iters - 1:
@@ -122,8 +186,27 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             
             if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
 
+        # ════════════════════════════════════════════════════════════════════
+        # 【为什么保存前要 model.eval()？】
+        # ════════════════════════════════════════════════════════════════════
+        #
+        # 【train() vs eval() 区别】
+        # - Dropout: train()随机丢弃神经元, eval()不丢弃
+        # - BatchNorm: train()用batch统计, eval()用全局统计
+        #
+        # 【eval() 其实不是必须的！】
+        # state_dict() 只保存参数值，不保存模式状态
+        # 加载后推理时还是要手动调 eval()
+        #
+        # 【这里 eval() 的真正原因】
+        # 1. 防止 BatchNorm 的 running_mean/var 被意外更新
+        # 2. 编程习惯: 保存时确保模型处于"干净"状态
+        # 3. 如果保存后立即测试验证集，需要 eval 模式
+        #
+        # 【注意】保存完后要 model.train() 恢复训练模式！
+        # ════════════════════════════════════════════════════════════════════
         if (step % args.save_interval == 0 or step == iters - 1) and is_main_process():
-            model.eval()
+            model.eval()  # 切换到评估模式
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
