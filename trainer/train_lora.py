@@ -286,7 +286,48 @@ if __name__ == "__main__":
     Logger(f"LoRA 参数占比: {lora_params_count / total_params * 100:.2f}%")
     
     # ==================== 冻结非LoRA参数，收集LoRA参数 ====================
-    # 这是 LoRA 的核心: 只训练 LoRA 参数
+    # ────────────────────────────────────────────────────────────────────
+    # 【原始矩阵的冻结就在这里！】
+    # ────────────────────────────────────────────────────────────────────
+    #
+    # 【LoRA 的核心思想】
+    #   原始权重 W₀ 保持不变 (frozen)
+    #   只训练低秩分解 ΔW = A @ B
+    #   最终输出 = W₀ @ x + A @ B @ x
+    #
+    # 【参数名字长什么样？】
+    #   原模型参数: "model.layers.0.attention.q_proj.weight"
+    #   LoRA 参数:  "model.layers.0.attention.q_proj.lora_A"
+    #              "model.layers.0.attention.q_proj.lora_B"
+    #                                              ↑
+    #                                    名字里包含 "lora"
+    #
+    # 【冻结逻辑】
+    #   if 'lora' in name:
+    #       requires_grad = True   # LoRA 参数: 可训练
+    #   else:
+    #       requires_grad = False  # 原模型参数: 冻结
+    #
+    # 【数值例子】
+    #   假设模型有 26M 参数:
+    #   - 原模型参数: 26M (frozen, requires_grad=False)
+    #   - LoRA 参数: 0.8M (trainable, requires_grad=True)
+    #   
+    #   训练时:
+    #   - forward: 所有参数都参与计算
+    #   - backward: 只有 requires_grad=True 的参数计算梯度
+    #   - optimizer.step: 只更新 LoRA 参数
+    #
+    # 【为什么要手动设置 requires_grad？】
+    #   PyTorch 默认所有参数 requires_grad=True
+    #   apply_lora() 只是添加了 LoRA 模块，没有冻结原参数
+    #   所以需要在这里手动设置
+    #
+    # 【冻结的好处】
+    #   1. 省显存: 不需要存储原模型的梯度 (省 ~50% 显存)
+    #   2. 省计算: 不需要计算原模型的反向传播
+    #   3. 保护知识: 原模型学到的知识不会被破坏
+    # ────────────────────────────────────────────────────────────────────
     lora_params = []
     for name, param in model.named_parameters():
         if 'lora' in name:
@@ -294,7 +335,7 @@ if __name__ == "__main__":
             param.requires_grad = True
             lora_params.append(param)
         else:
-            # 原模型参数: 冻结
+            # 原模型参数: 冻结 (这行就是"锁定"原始矩阵！)
             param.requires_grad = False
     
     # ==================== 6. 定义数据和优化器 ====================
