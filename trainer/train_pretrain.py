@@ -1,3 +1,34 @@
+"""
+================================================================================
+                    MiniMind 预训练脚本 (Pre-training)
+================================================================================
+
+【什么是预训练】
+预训练是 LLM 训练的第一阶段，目标是让模型学习语言的基本规律:
+1. 语法结构 - 什么样的句子是合法的
+2. 语义关系 - 词语之间的含义关联  
+3. 世界知识 - 从大量文本中学习事实和常识
+
+【训练目标】
+因果语言模型目标 (Causal Language Modeling):
+给定文本 [t₁, t₂, ..., tₙ]，预测每个位置的下一个 token:
+Loss = -Σ log P(tᵢ | t₁, ..., tᵢ₋₁)
+
+【关键技术】
+1. 混合精度训练 (AMP): 加速训练并节省显存
+2. 梯度累积: 在显存有限时模拟大批量
+3. 梯度裁剪: 防止梯度爆炸
+4. 余弦学习率调度: 更好的收敛
+5. 分布式训练 (DDP): 多 GPU 加速
+
+【使用方法】
+单卡训练:
+    python train_pretrain.py --epochs 1 --batch_size 32
+
+多卡训练:
+    torchrun --nproc_per_node=4 train_pretrain.py --epochs 1 --batch_size 32
+"""
+
 import os
 import sys
 
@@ -21,53 +52,220 @@ warnings.filterwarnings('ignore')
 
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+    """
+    训练一个 epoch
+    
+    【核心训练循环】
+    for batch in data:
+        1. 前向传播: logits = model(X)
+        2. 计算损失: loss = CrossEntropy(logits, Y) 
+        3. 反向传播: loss.backward()
+        4. 梯度累积: 累积 N 步后更新
+        5. 梯度裁剪: 防止梯度爆炸
+        6. 参数更新: optimizer.step()
+    """
+    # ════════════════════════════════════════════════════════════════════════════
+    # 【什么是交叉熵 (Cross-Entropy)？】
+    # ════════════════════════════════════════════════════════════════════════════
+    #
+    # 【信息论起源】
+    # 交叉熵衡量两个概率分布之间的"距离":
+    #   H(p, q) = -Σ p(x) × log(q(x))
+    #   - p(x): 真实分布 (one-hot，正确词=1，其他=0)
+    #   - q(x): 模型预测 (softmax后的概率)
+    #
+    # 【在语言模型中】
+    # 例如预测"天气"的下一个词:
+    #   真实: p = [0, 0, ..., 1(很好), ..., 0]
+    #   预测: q = [0.1, 0.05, 0.3(很好), 0.15, ...]
+    #   交叉熵 = -log(0.3) = 1.2
+    #
+    # 【直觉】
+    #   预测概率 1.0 → loss = 0 (完美)
+    #   预测概率 0.5 → loss = 0.69
+    #   预测概率 0.01 → loss = 4.6 (很差)
+    #
+    # 【reduction='none'】
+    # 返回每个位置的loss，不取平均
+    # 这样可以用 loss_mask 手动过滤掉 padding 位置
+    # ════════════════════════════════════════════════════════════════════════════
+    loss_fct = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
-    for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
-        input_ids = input_ids.to(args.device)
-        labels = labels.to(args.device)
+    
+    for step, (X, Y, loss_mask) in enumerate(loader, start=start_step + 1):
+        # X: 输入 [B, L-1], Y: 目标 [B, L-1] (X 右移一位)
+        # loss_mask: 非 padding 位置为 1
+        X = X.to(args.device)
+        Y = Y.to(args.device)
+        loss_mask = loss_mask.to(args.device)
+        
+        # ════════════════════════════════════════════════════════════════════
+        # 【优化器 (Optimizer) 是什么？】
+        # ════════════════════════════════════════════════════════════════════
+        #
+        # 【核心任务】根据梯度更新模型参数，让 loss 越来越小
+        #
+        # 【最简单的优化器: SGD (随机梯度下降)】
+        #   参数 = 参数 - 学习率 × 梯度
+        #   θ_new = θ_old - lr × ∂Loss/∂θ
+        #
+        # 【SGD 的问题】
+        # 1. 所有参数用同一个学习率，但有些参数需要大步走，有些需要小步
+        # 2. 容易在"峡谷"地形震荡（梯度方向来回摆动）
+        # 3. 容易卡在鞍点（梯度≈0但不是最优点）
+        #
+        # ────────────────────────────────────────────────────────────────────
+        # 【AdamW 是什么？】Adam + Weight Decay (权重衰减)
+        # ────────────────────────────────────────────────────────────────────
+        #
+        # Adam = Adaptive Moment Estimation (自适应矩估计)
+        # 结合了两个技术:
+        #
+        # 1.【动量 (Momentum)】记住之前的梯度方向
+        #    m = β₁ × m_old + (1-β₁) × gradient
+        #    像滚雪球，积累历史梯度，平滑震荡
+        #
+        # 2.【自适应学习率 (RMSprop)】给每个参数不同的学习率
+        #    v = β₂ × v_old + (1-β₂) × gradient²
+        #    梯度大的参数 → 学习率小（稳一点）
+        #    梯度小的参数 → 学习率大（快一点）
+        #
+        # 【Adam 更新公式】
+        #   θ = θ - lr × m / (√v + ε)
+        #
+        # 【AdamW 的改进】
+        # 原始 Adam 的权重衰减实现有 bug（和自适应学习率冲突）
+        # AdamW 修复了这个问题，直接在参数上衰减:
+        #   θ = θ - lr × (m / (√v + ε) + weight_decay × θ)
+        #
+        # 【默认超参数】
+        #   lr = 0.001          # 学习率
+        #   betas = (0.9, 0.999) # β₁控制动量, β₂控制自适应
+        #   eps = 1e-8          # 防止除零
+        #   weight_decay = 0.01 # 防止过拟合
+        # ════════════════════════════════════════════════════════════════════
+        
+        # ════════════════════════════════════════════════════════════════════
+        # 【param_group 是什么？从哪来的？】
+        # ════════════════════════════════════════════════════════════════════
+        #
+        # 【来源】optimizer 创建时自动生成
+        #   optimizer = AdamW(model.parameters(), lr=0.001)
+        #   → optimizer.param_groups = [
+        #       {
+        #           'params': [所有模型参数的引用],
+        #           'lr': 0.001,           # 学习率
+        #           'betas': (0.9, 0.999), # Adam动量参数
+        #           'eps': 1e-8,           # 数值稳定性
+        #           'weight_decay': 0.01,  # 权重衰减
+        #       }
+        #     ]
+        #
+        # 【为什么是列表？】可以给不同层设置不同学习率:
+        #   optimizer = AdamW([
+        #       {'params': model.encoder.parameters(), 'lr': 1e-4},
+        #       {'params': model.decoder.parameters(), 'lr': 1e-3}
+        #   ])  → param_groups 有 2 个元素
+        #
+        # 【这里干嘛？】动态调整学习率，无需重建 optimizer
+        # ════════════════════════════════════════════════════════════════════
         lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
+        # 混合精度前向传播
         with autocast_ctx:
-            res = model(input_ids, labels=labels)
-            loss = res.loss + res.aux_loss
+            res = model(X)
+            # 计算每个位置的交叉熵损失
+            loss = loss_fct(
+                res.logits.view(-1, res.logits.size(-1)),  # [B*L, vocab_size]
+                Y.view(-1)                                  # [B*L]
+            ).view(Y.size())  # [B, L]
+
+            # 应用 loss_mask，只在非 padding 位置计算损失
+            logits_loss = (loss * loss_mask).sum() / loss_mask.sum()
+            # 添加 MoE 辅助损失 (负载均衡)
+            loss = logits_loss + res.aux_loss
+            # 梯度累积: 损失除以累积步数
             loss = loss / args.accumulation_steps
 
+        # ════════════════════════════════════════════════════════════════════
+        # 【GradScaler 是干嘛的？】混合精度训练的梯度缩放器
+        # ════════════════════════════════════════════════════════════════════
+        #
+        # 【背景问题】
+        # float16 数值范围很小: 最小正数 ≈ 6×10⁻⁸
+        # 梯度可能非常小(如 1×10⁻⁸)，在 float16 中会变成 0！
+        # → 梯度消失，模型无法训练
+        #
+        # 【四步流程】
+        # 1. scale(loss): 放大 loss (如 ×65536)
+        #    → 反向传播时梯度也被放大，小梯度不会下溢
+        # 2. unscale_(optimizer): 恢复原始梯度大小
+        # 3. step(optimizer): 检查 inf/nan，无则更新参数
+        # 4. update(): 动态调整缩放因子
+        #
+        # 【流程图】
+        # loss=0.001 → scale() → 65.536 → backward()
+        #           → scaled_grads → unscale_() → real_grads
+        #           → clip → step() → update()
+        # ════════════════════════════════════════════════════════════════════
         scaler.scale(loss).backward()
 
+        # 反向传播 (使用 GradScaler 处理混合精度)
         if (step + 1) % args.accumulation_steps == 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-
-            scaler.step(optimizer)
-            scaler.update()
-
+            scaler.unscale_(optimizer)       # 恢复原始梯度
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)  # 梯度裁剪
+            scaler.step(optimizer)           # 检查后更新参数
+            scaler.update()                  # 调整缩放因子
             optimizer.zero_grad(set_to_none=True)
 
         if step % args.log_interval == 0 or step == iters - 1:
             spend_time = time.time() - start_time
             current_loss = loss.item() * args.accumulation_steps
-            current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
-            current_logits_loss = current_loss - current_aux_loss
+            current_logits_loss = logits_loss.item()
+            current_aux_loss = res.aux_loss.item()
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / (step + 1) * iters // 60 - spend_time // 60
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
+            
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, learning_rate: {current_lr:.8f}, epoch_time: {eta_min:.3f}min')
+            
             if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
 
+        # ════════════════════════════════════════════════════════════════════
+        # 【为什么保存前要 model.eval()？】
+        # ════════════════════════════════════════════════════════════════════
+        #
+        # 【train() vs eval() 区别】
+        # - Dropout: train()随机丢弃神经元, eval()不丢弃
+        # - BatchNorm: train()用batch统计, eval()用全局统计
+        #
+        # 【eval() 其实不是必须的！】
+        # state_dict() 只保存参数值，不保存模式状态
+        # 加载后推理时还是要手动调 eval()
+        #
+        # 【这里 eval() 的真正原因】
+        # 1. 防止 BatchNorm 的 running_mean/var 被意外更新
+        # 2. 编程习惯: 保存时确保模型处于"干净"状态
+        # 3. 如果保存后立即测试验证集，需要 eval 模式
+        #
+        # 【注意】保存完后要 model.train() 恢复训练模式！
+        # ════════════════════════════════════════════════════════════════════
         if (step % args.save_interval == 0 or step == iters - 1) and is_main_process():
-            model.eval()
+            model.eval()  # 切换到评估模式
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-            raw_model = model.module if isinstance(model, DistributedDataParallel) else model
-            raw_model = getattr(raw_model, '_orig_mod', raw_model)
-            state_dict = raw_model.state_dict()
-            torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                state_dict = model.module.state_dict()
+            else:
+                state_dict = model.state_dict()
+            state_dict = {k: v.half().cpu() for k, v in state_dict.items()}
+            torch.save(state_dict, ckp)
             lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints')
             model.train()
             del state_dict
 
-        del input_ids, labels, res, loss
+        del X, Y, loss_mask, res, loss
 
 
 if __name__ == "__main__":
@@ -93,7 +291,6 @@ if __name__ == "__main__":
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-Pretrain", help="wandb项目名")
-    parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
@@ -122,9 +319,6 @@ if __name__ == "__main__":
     
     # ========== 5. 定义模型、数据、优化器 ==========
     model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
-    if args.use_compile == 1:
-        model = torch.compile(model)
-        Logger('torch.compile enabled')
     train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))

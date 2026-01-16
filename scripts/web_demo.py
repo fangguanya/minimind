@@ -1,328 +1,405 @@
-import random
-import re
-from threading import Thread
+"""
+================================================================================
+                    MiniMind Web Demo (Gradio 界面)
+================================================================================
 
+【什么是这个脚本】
+这是一个基于 Gradio 的 Web 演示界面:
+- 提供直观的聊天界面
+- 支持参数调节
+- 实时流式输出
+
+【Gradio 简介】
+Gradio 是一个快速创建 ML 演示界面的库:
+- 几行代码创建 Web UI
+- 自动处理前后端通信
+- 支持各种输入输出组件
+
+【功能特点】
+1. 聊天界面: 类似 ChatGPT 的对话框
+2. 参数调节: 温度、top_p、max_tokens
+3. 流式输出: 实时显示生成过程
+4. 清除历史: 一键清除对话
+
+【使用方法】
+启动服务:
+    python web_demo.py --port 7860 --model_weight full_sft
+
+然后在浏览器访问: http://localhost:7860
+
+【界面布局】
+┌─────────────────────────────────────────┐
+│                 MiniMind Chat           │
+├─────────────────────────────────────────┤
+│  ┌─────────────────────────────────┐    │
+│  │ 用户: 你好                      │    │
+│  │ 助手: 你好！有什么可以帮你的？  │    │
+│  │ ...                              │    │
+│  └─────────────────────────────────┘    │
+├─────────────────────────────────────────┤
+│  输入框: [________________] [发送]      │
+├─────────────────────────────────────────┤
+│  参数: Temperature [0.7] Max Tokens [512]│
+└─────────────────────────────────────────┘
+"""
+
+import os
+import sys
+
+# 将父目录添加到路径
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import argparse
 import torch
-import numpy as np
-import streamlit as st
+import gradio as gr
+from transformers import AutoTokenizer
 
-st.set_page_config(page_title="MiniMind", initial_sidebar_state="collapsed")
-
-st.markdown("""
-    <style>
-        /* 添加操作按钮样式 */
-        .stButton button {
-            border-radius: 50% !important;  /* 改为圆形 */
-            width: 32px !important;         /* 固定宽度 */
-            height: 32px !important;        /* 固定高度 */
-            padding: 0 !important;          /* 移除内边距 */
-            background-color: transparent !important;
-            border: 1px solid #ddd !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            font-size: 14px !important;
-            color: #666 !important;         /* 更柔和的颜色 */
-            margin: 5px 10px 5px 0 !important;  /* 调整按钮间距 */
-        }
-        .stButton button:hover {
-            border-color: #999 !important;
-            color: #333 !important;
-            background-color: #f5f5f5 !important;
-        }
-        .stMainBlockContainer > div:first-child {
-            margin-top: -50px !important;
-        }
-        .stApp > div:last-child {
-            margin-bottom: -35px !important;
-        }
-        
-        /* 重置按钮基础样式 */
-        .stButton > button {
-            all: unset !important;  /* 重置所有默认样式 */
-            box-sizing: border-box !important;
-            border-radius: 50% !important;
-            width: 18px !important;
-            height: 18px !important;
-            min-width: 18px !important;
-            min-height: 18px !important;
-            max-width: 18px !important;
-            max-height: 18px !important;
-            padding: 0 !important;
-            background-color: transparent !important;
-            border: 1px solid #ddd !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            font-size: 14px !important;
-            color: #888 !important;
-            cursor: pointer !important;
-            transition: all 0.2s ease !important;
-            margin: 0 2px !important;  /* 调整这里的 margin 值 */
-        }
-
-    </style>
-""", unsafe_allow_html=True)
-
-system_prompt = []
-device = "cuda" if torch.cuda.is_available() else "cpu"
+from model.model_minimind import MiniMindForCausalLM, MiniMindConfig
+from model.model_lora import apply_lora, load_lora
 
 
-def process_assistant_content(content):
-    if model_source == "API" and 'R1' not in api_model_name:
-        return content
-    if model_source != "API" and 'R1' not in MODEL_PATHS[selected_model][1]:
-        return content
-
-    if '<think>' in content and '</think>' in content:
-        content = re.sub(r'(<think>)(.*?)(</think>)',
-                         r'<details style="font-style: italic; background: rgba(222, 222, 222, 0.5); padding: 10px; border-radius: 10px;"><summary style="font-weight:bold;">推理内容（展开）</summary>\2</details>',
-                         content,
-                         flags=re.DOTALL)
-
-    if '<think>' in content and '</think>' not in content:
-        content = re.sub(r'<think>(.*?)$',
-                         r'<details open style="font-style: italic; background: rgba(222, 222, 222, 0.5); padding: 10px; border-radius: 10px;"><summary style="font-weight:bold;">推理中...</summary>\1</details>',
-                         content,
-                         flags=re.DOTALL)
-
-    if '<think>' not in content and '</think>' in content:
-        content = re.sub(r'(.*?)</think>',
-                         r'<details style="font-style: italic; background: rgba(222, 222, 222, 0.5); padding: 10px; border-radius: 10px;"><summary style="font-weight:bold;">推理内容（展开）</summary>\1</details>',
-                         content,
-                         flags=re.DOTALL)
-
-    return content
+# ==================== 全局变量 ====================
+model = None
+tokenizer = None
+args = None
 
 
-@st.cache_resource
-def load_model_tokenizer(model_path):
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        trust_remote_code=True
+def generate_response(message: str, history: list, temperature: float = 0.7, 
+                      top_p: float = 0.9, max_tokens: int = 512):
+    """
+    生成对话回复 (流式)
+    
+    【流程】
+    1. 将对话历史和当前消息组装成 messages 列表
+    2. 使用 chat_template 格式化
+    3. 逐 token 生成并 yield
+    
+    【参数】
+    - message: 用户当前输入
+    - history: 对话历史 [(user_msg, bot_msg), ...]
+    - temperature: 采样温度
+    - top_p: nucleus 采样参数
+    - max_tokens: 最大生成长度
+    
+    【Yields】
+    - 逐步生成的回复文本
+    """
+    # ==================== 1. 组装对话历史 ====================
+    messages = []
+    
+    # 添加系统提示 (可选)
+    # messages.append({"role": "system", "content": "你是一个有用的助手。"})
+    
+    # 添加历史对话
+    for user_msg, bot_msg in history:
+        messages.append({"role": "user", "content": user_msg})
+        if bot_msg:  # bot_msg 可能为 None (正在生成时)
+            messages.append({"role": "assistant", "content": bot_msg})
+    
+    # 添加当前用户消息
+    messages.append({"role": "user", "content": message})
+    
+    # ==================== 2. 使用 chat_template 格式化 ====================
+    # add_generation_prompt=True 会添加 <|im_start|>assistant\n
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_path,
-        trust_remote_code=True
-    )
-    model = model.eval().to(device)
-    return model, tokenizer
-
-
-def clear_chat_messages():
-    del st.session_state.messages
-    del st.session_state.chat_messages
-
-
-def init_chat_messages():
-    if "messages" in st.session_state:
-        for i, message in enumerate(st.session_state.messages):
-            if message["role"] == "assistant":
-                with st.chat_message("assistant", avatar=image_url):
-                    st.markdown(process_assistant_content(message["content"]), unsafe_allow_html=True)
-                    if st.button("🗑", key=f"delete_{i}"):
-                        st.session_state.messages.pop(i)
-                        st.session_state.messages.pop(i - 1)
-                        st.session_state.chat_messages.pop(i)
-                        st.session_state.chat_messages.pop(i - 1)
-                        st.rerun()
-            else:
-                st.markdown(
-                    f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px;  background-color: #ddd; border-radius: 10px; color: black;">{message["content"]}</div></div>',
-                    unsafe_allow_html=True)
-
-    else:
-        st.session_state.messages = []
-        st.session_state.chat_messages = []
-
-    return st.session_state.messages
-
-def regenerate_answer(index):
-    st.session_state.messages.pop()
-    st.session_state.chat_messages.pop()
-    st.rerun()
-
-
-def delete_conversation(index):
-    st.session_state.messages.pop(index)
-    st.session_state.messages.pop(index - 1)
-    st.session_state.chat_messages.pop(index)
-    st.session_state.chat_messages.pop(index - 1)
-    st.rerun()
-
-
-st.sidebar.title("模型设定调整")
-
-# st.sidebar.text("训练数据偏差，增加上下文记忆时\n多轮对话（较单轮）容易出现能力衰减")
-st.session_state.history_chat_num = st.sidebar.slider("Number of Historical Dialogues", 0, 6, 0, step=2)
-# st.session_state.history_chat_num = 0
-st.session_state.max_new_tokens = st.sidebar.slider("Max Sequence Length", 256, 8192, 8192, step=1)
-st.session_state.temperature = st.sidebar.slider("Temperature", 0.6, 1.2, 0.85, step=0.01)
-
-model_source = st.sidebar.radio("选择模型来源", ["本地模型", "API"], index=0)
-
-if model_source == "API":
-    api_url = st.sidebar.text_input("API URL", value="http://127.0.0.1:8000/v1")
-    api_model_id = st.sidebar.text_input("Model ID", value="minimind")
-    api_model_name = st.sidebar.text_input("Model Name", value="MiniMind2")
-    api_key = st.sidebar.text_input("API Key", value="none", type="password")
-    slogan = f"Hi, I'm {api_model_name}"
-else:
-    MODEL_PATHS = {
-        "MiniMind2-R1 (0.1B)": ["../MiniMind2-R1", "MiniMind2-R1"],
-        "MiniMind2-Small-R1 (0.02B)": ["../MiniMind2-Small-R1", "MiniMind2-Small-R1"],
-        "MiniMind2 (0.1B)": ["../MiniMind2", "MiniMind2"],
-        "MiniMind2-MoE (0.15B)": ["../MiniMind2-MoE", "MiniMind2-MoE"],
-        "MiniMind2-Small (0.02B)": ["../MiniMind2-Small", "MiniMind2-Small"]
-    }
-
-    selected_model = st.sidebar.selectbox('Models', list(MODEL_PATHS.keys()), index=2)  # 默认选择 MiniMind2
-    model_path = MODEL_PATHS[selected_model][0]
-    slogan = f"Hi, I'm {MODEL_PATHS[selected_model][1]}"
-
-image_url = "https://www.modelscope.cn/api/v1/studio/gongjy/MiniMind/repo?Revision=master&FilePath=images%2Flogo2.png&View=true"
-
-st.markdown(
-    f'<div style="display: flex; flex-direction: column; align-items: center; text-align: center; margin: 0; padding: 0;">'
-    '<div style="font-style: italic; font-weight: 900; margin: 0; padding-top: 4px; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; width: 100%;">'
-    f'<img src="{image_url}" style="width: 45px; height: 45px; "> '
-    f'<span style="font-size: 26px; margin-left: 10px;">{slogan}</span>'
-    '</div>'
-    '<span style="color: #bbb; font-style: italic; margin-top: 6px; margin-bottom: 10px;">内容完全由AI生成，请务必仔细甄别<br>Content AI-generated, please discern with care</span>'
-    '</div>',
-    unsafe_allow_html=True
-)
-
-
-def setup_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def main():
-    if model_source == "本地模型":
-        model, tokenizer = load_model_tokenizer(model_path)
-    else:
-        model, tokenizer = None, None
-
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-        st.session_state.chat_messages = []
-
-    messages = st.session_state.messages
-
-    for i, message in enumerate(messages):
-        if message["role"] == "assistant":
-            with st.chat_message("assistant", avatar=image_url):
-                st.markdown(process_assistant_content(message["content"]), unsafe_allow_html=True)
-                if st.button("×", key=f"delete_{i}"):
-                    st.session_state.messages = st.session_state.messages[:i - 1]
-                    st.session_state.chat_messages = st.session_state.chat_messages[:i - 1]
-                    st.rerun()
-        else:
-            st.markdown(
-                f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px;  background-color: gray; border-radius: 10px; color:white; ">{message["content"]}</div></div>',
-                unsafe_allow_html=True)
-
-    prompt = st.chat_input(key="input", placeholder="给 MiniMind 发送消息")
-
-    if hasattr(st.session_state, 'regenerate') and st.session_state.regenerate:
-        prompt = st.session_state.last_user_message
-        regenerate_index = st.session_state.regenerate_index
-        delattr(st.session_state, 'regenerate')
-        delattr(st.session_state, 'last_user_message')
-        delattr(st.session_state, 'regenerate_index')
-
-    if prompt:
-        st.markdown(
-            f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px;  background-color: gray; border-radius: 10px; color:white; ">{prompt}</div></div>',
-            unsafe_allow_html=True)
-        messages.append({"role": "user", "content": prompt[-st.session_state.max_new_tokens:]})
-        st.session_state.chat_messages.append({"role": "user", "content": prompt[-st.session_state.max_new_tokens:]})
-
-        with st.chat_message("assistant", avatar=image_url):
-            placeholder = st.empty()
-
-            if model_source == "API":
-                try:
-                    from openai import OpenAI
-
-                    client = OpenAI(
-                        api_key=api_key,
-                        base_url=api_url
-                    )
-                    history_num = st.session_state.history_chat_num + 1  # +1 是为了包含当前的用户消息
-                    conversation_history = system_prompt + st.session_state.chat_messages[-history_num:]
-                    answer = ""
-                    response = client.chat.completions.create(
-                        model=api_model_id,
-                        messages=conversation_history,
-                        stream=True,
-                        temperature=st.session_state.temperature
-                    )
-
-                    for chunk in response:
-                        content = chunk.choices[0].delta.content or ""
-                        answer += content
-                        placeholder.markdown(process_assistant_content(answer), unsafe_allow_html=True)
-
-                except Exception as e:
-                    answer = f"API调用出错: {str(e)}"
-                    placeholder.markdown(answer, unsafe_allow_html=True)
-            else:
-                random_seed = random.randint(0, 2 ** 32 - 1)
-                setup_seed(random_seed)
-
-                st.session_state.chat_messages = system_prompt + st.session_state.chat_messages[
-                                                                 -(st.session_state.history_chat_num + 1):]
-                new_prompt = tokenizer.apply_chat_template(
-                    st.session_state.chat_messages,
-                    tokenize=False,
-                    add_generation_prompt=True
+    
+    # ==================== 3. Token 化 ====================
+    input_ids = tokenizer(
+        prompt, 
+        return_tensors="pt", 
+        add_special_tokens=False
+    ).input_ids.to(args.device)
+    
+    # ==================== 4. 流式生成 ====================
+    generated_text = ""
+    past_key_values = None
+    current_input_ids = input_ids
+    
+    for _ in range(max_tokens):
+        with torch.no_grad():
+            # 前向传播
+            outputs = model(
+                current_input_ids,
+                past_key_values=past_key_values,
+                use_cache=True  # 使用 KV 缓存加速
+            )
+            
+            # 获取最后一个位置的 logits
+            next_token_logits = outputs.logits[:, -1, :]
+            
+            # 采样策略
+            if temperature > 0:
+                # 应用温度
+                next_token_logits = next_token_logits / temperature
+                
+                # Top-p (nucleus) 采样
+                # 只保留累积概率达到 top_p 的 token
+                sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # 找到累积概率超过 top_p 的位置
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                # 将这些位置的 logits 设为负无穷
+                indices_to_remove = sorted_indices_to_remove.scatter(
+                    1, sorted_indices, sorted_indices_to_remove
                 )
+                next_token_logits[indices_to_remove] = float('-inf')
+                
+                # 从修改后的分布中采样
+                probs = torch.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                # 贪婪解码 (temperature=0)
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            
+            # 检查是否是结束 token
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+            
+            # 解码当前 token
+            token_text = tokenizer.decode(next_token[0], skip_special_tokens=True)
+            generated_text += token_text
+            
+            # Yield 当前生成的文本 (流式输出)
+            yield generated_text
+            
+            # 更新状态
+            current_input_ids = next_token
+            past_key_values = outputs.past_key_values
+    
+    # 返回最终结果
+    yield generated_text
 
-                inputs = tokenizer(
-                    new_prompt,
-                    return_tensors="pt",
-                    truncation=True
-                ).to(device)
 
-                streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-                generation_kwargs = {
-                    "input_ids": inputs.input_ids,
-                    "max_length": inputs.input_ids.shape[1] + st.session_state.max_new_tokens,
-                    "num_return_sequences": 1,
-                    "do_sample": True,
-                    "attention_mask": inputs.attention_mask,
-                    "pad_token_id": tokenizer.pad_token_id,
-                    "eos_token_id": tokenizer.eos_token_id,
-                    "temperature": st.session_state.temperature,
-                    "top_p": 0.85,
-                    "streamer": streamer,
-                }
+def clear_history():
+    """清除对话历史"""
+    return [], ""
 
-                Thread(target=model.generate, kwargs=generation_kwargs).start()
 
-                answer = ""
-                for new_text in streamer:
-                    answer += new_text
-                    placeholder.markdown(process_assistant_content(answer), unsafe_allow_html=True)
+def init_model_from_args(args_input):
+    """
+    根据命令行参数初始化模型
+    
+    【加载流程】
+    1. 创建模型配置
+    2. 加载 tokenizer
+    3. 初始化模型并加载权重
+    4. (可选) 应用 LoRA
+    5. 设置为评估模式
+    """
+    global model, tokenizer, args
+    args = args_input
+    
+    # 1. 创建模型配置
+    lm_config = MiniMindConfig(
+        hidden_size=args.hidden_size,
+        num_hidden_layers=args.num_hidden_layers,
+        use_moe=bool(args.use_moe)
+    )
+    
+    # 2. 加载 tokenizer
+    tokenizer = AutoTokenizer.from_pretrained('../model', trust_remote_code=True)
+    
+    # 3. 初始化模型
+    model = MiniMindForCausalLM(lm_config)
+    
+    # 4. 加载权重
+    moe_suffix = '_moe' if lm_config.use_moe else ''
+    weight_path = f'../out/{args.model_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+    state_dict = torch.load(weight_path, map_location=args.device)
+    model.load_state_dict(state_dict, strict=False)
+    
+    # 5. (可选) 加载 LoRA
+    if args.lora_weight:
+        apply_lora(model)
+        lora_path = f'../out/lora/{args.lora_weight}_{lm_config.hidden_size}.pth'
+        load_lora(model, lora_path)
+        print(f"LoRA 权重已加载: {lora_path}")
+    
+    # 6. 移到设备并设为评估模式
+    model = model.to(args.device)
+    model.eval()
+    
+    print(f"模型加载完成: {weight_path}")
 
-            messages.append({"role": "assistant", "content": answer})
-            st.session_state.chat_messages.append({"role": "assistant", "content": answer})
-            with st.empty():
-                if st.button("×", key=f"delete_{len(messages) - 1}"):
-                    st.session_state.messages = st.session_state.messages[:-2]
-                    st.session_state.chat_messages = st.session_state.chat_messages[:-2]
-                    st.rerun()
+
+def create_demo():
+    """
+    创建 Gradio 演示界面
+    
+    【界面组件】
+    - Chatbot: 对话显示区域
+    - Textbox: 用户输入框
+    - Button: 发送和清除按钮
+    - Slider: 参数调节滑块
+    """
+    
+    # 创建界面
+    with gr.Blocks(title="MiniMind Chat", theme=gr.themes.Soft()) as demo:
+        # 标题
+        gr.Markdown("""
+        # 🧠 MiniMind Chat
+        轻量级中文语言模型对话演示
+        """)
+        
+        # 对话区域
+        chatbot = gr.Chatbot(
+            height=500,
+            bubble_full_width=False,
+            avatar_images=(None, "https://em-content.zobj.net/source/apple/354/robot_1f916.png")
+        )
+        
+        # 输入区域
+        with gr.Row():
+            msg = gr.Textbox(
+                placeholder="输入你的问题...",
+                show_label=False,
+                container=False,
+                scale=8
+            )
+            submit_btn = gr.Button("发送", variant="primary", scale=1)
+            clear_btn = gr.Button("清除", scale=1)
+        
+        # 参数调节区域
+        with gr.Accordion("⚙️ 高级参数", open=False):
+            with gr.Row():
+                temperature = gr.Slider(
+                    minimum=0.0, 
+                    maximum=2.0, 
+                    value=0.7, 
+                    step=0.1, 
+                    label="Temperature (温度)",
+                    info="越高越随机，越低越确定"
+                )
+                top_p = gr.Slider(
+                    minimum=0.0, 
+                    maximum=1.0, 
+                    value=0.9, 
+                    step=0.1, 
+                    label="Top-P",
+                    info="Nucleus 采样参数"
+                )
+                max_tokens = gr.Slider(
+                    minimum=64, 
+                    maximum=2048, 
+                    value=512, 
+                    step=64, 
+                    label="Max Tokens",
+                    info="最大生成长度"
+                )
+        
+        # 使用示例
+        gr.Examples(
+            examples=[
+                "你好，请介绍一下你自己",
+                "请解释一下什么是机器学习",
+                "帮我写一首关于春天的诗",
+                "1+1等于多少？请详细解释"
+            ],
+            inputs=msg
+        )
+        
+        # ==================== 事件绑定 ====================
+        
+        def user_submit(message, history):
+            """用户提交消息"""
+            if not message.strip():
+                return "", history
+            # 添加用户消息到历史 (bot 回复先设为 None)
+            history = history + [[message, None]]
+            return "", history
+        
+        def bot_response(history, temperature, top_p, max_tokens):
+            """生成机器人回复"""
+            if not history:
+                return history
+            
+            # 获取最后一条用户消息
+            user_message = history[-1][0]
+            
+            # 流式生成回复
+            for response in generate_response(
+                user_message, 
+                history[:-1],  # 历史不包括当前这条
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens
+            ):
+                history[-1][1] = response
+                yield history
+        
+        # 提交按钮事件
+        submit_btn.click(
+            user_submit,
+            [msg, chatbot],
+            [msg, chatbot],
+            queue=False
+        ).then(
+            bot_response,
+            [chatbot, temperature, top_p, max_tokens],
+            chatbot
+        )
+        
+        # 回车提交
+        msg.submit(
+            user_submit,
+            [msg, chatbot],
+            [msg, chatbot],
+            queue=False
+        ).then(
+            bot_response,
+            [chatbot, temperature, top_p, max_tokens],
+            chatbot
+        )
+        
+        # 清除按钮事件
+        clear_btn.click(
+            lambda: ([], ""),
+            None,
+            [chatbot, msg]
+        )
+    
+    return demo
 
 
 if __name__ == "__main__":
-    from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
-
-    main()
+    # ==================== 参数解析 ====================
+    parser = argparse.ArgumentParser(description="MiniMind Web Demo")
+    
+    # 服务器配置
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="服务器地址")
+    parser.add_argument("--port", type=int, default=7860, help="服务器端口")
+    parser.add_argument("--share", action="store_true", help="是否创建公共链接")
+    
+    # 模型配置
+    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="推理设备")
+    parser.add_argument("--hidden_size", type=int, default=512, help="隐藏层维度")
+    parser.add_argument("--num_hidden_layers", type=int, default=8, help="隐藏层数量")
+    parser.add_argument("--use_moe", type=int, default=0, choices=[0, 1], help="是否使用MoE")
+    
+    # 权重配置
+    parser.add_argument("--model_weight", type=str, default="full_sft", help="基础权重名称")
+    parser.add_argument("--lora_weight", type=str, default=None, help="LoRA权重名称（可选）")
+    
+    args = parser.parse_args()
+    
+    # 初始化模型
+    print("正在加载模型...")
+    init_model_from_args(args)
+    
+    # 创建并启动 demo
+    print(f"启动 Web Demo: http://{args.host}:{args.port}")
+    demo = create_demo()
+    demo.queue()
+    demo.launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share
+    )

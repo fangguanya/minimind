@@ -1,3 +1,30 @@
+"""
+================================================================================
+                    MiniMind 模型评估与对话脚本
+================================================================================
+
+【功能】
+1. 加载训练好的模型
+2. 支持自动测试和交互对话
+3. 支持 LoRA 适配器加载
+4. 显示生成速度
+
+【支持的权重类型】
+- pretrain: 预训练模型 (只学了语言规律，不会对话)
+- full_sft: 监督微调模型 (学会了对话)
+- dpo: DPO 对齐后的模型
+- reason: 推理模型 (会使用 <think>...<answer> 格式)
+- ppo_actor/grpo/spo: 强化学习训练后的模型
+
+【使用方法】
+python eval_llm.py --weight full_sft --hidden_size 512
+
+【交互模式】
+运行后选择:
+- 0: 自动测试预设问题
+- 1: 手动输入问题对话
+"""
+
 import time
 import argparse
 import random
@@ -10,8 +37,26 @@ from trainer.trainer_utils import setup_seed, get_model_params
 warnings.filterwarnings('ignore')
 
 def init_model(args):
+    """
+    初始化模型和分词器
+    
+    【加载方式】
+    1. 本地 PyTorch 权重 (load_from='model')
+       - 从 out/ 目录加载 .pth 文件
+       - 支持 LoRA 适配器
+    
+    2. HuggingFace 模型 (load_from='path/to/model')
+       - 直接加载 transformers 格式的模型
+    
+    【LoRA 加载】
+    如果指定了 lora_weight，会:
+    1. 先为模型添加 LoRA 层
+    2. 然后加载 LoRA 权重
+    """
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
+    
     if 'model' in args.load_from:
+        # 本地权重加载
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
@@ -21,11 +66,15 @@ def init_model(args):
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
+        
+        # 加载 LoRA 适配器 (如果指定)
         if args.lora_weight != 'None':
             apply_lora(model)
             load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
     else:
+        # HuggingFace 模型加载
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
+    
     get_model_params(model, model.config)
     return model.eval().to(args.device), tokenizer
 
