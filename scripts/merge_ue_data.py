@@ -2,6 +2,7 @@
 合并数据集脚本
 - 合并Pretrain: UE代码 + 通用知识
 - 合并SFT: UE问答 + 通用对话
+支持选择不同的数据集版本
 """
 import os
 import sys
@@ -12,20 +13,42 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
+# 数据集配置
+PRETRAIN_DATASETS = {
+    'hq': 'pretrain_hq.jsonl',      # 高质量预训练数据 (~140万条)
+}
 
-def merge_pretrain_datasets(ue_sample_ratio=0.3):
+SFT_DATASETS = {
+    'mini': 'sft_mini_512.jsonl',   # 精简版 (~120万条, 1.2GB)
+    '512': 'sft_512.jsonl',         # 完整512版 (~680万条, 7.2GB)
+    '1024': 'sft_1024.jsonl',       # 1024版 (~420万条, 5.3GB)
+    '2048': 'sft_2048.jsonl',       # 2048版 (~540万条, 8.5GB)
+}
+
+
+def merge_pretrain_datasets(pretrain_dataset='hq', ue_sample_ratio=0.3):
     """
     合并预训练数据集
     Args:
-        ue_sample_ratio: UE数据采样比例 (0.3表示采样30%的UE数据，避免数据太大)
+        pretrain_dataset: 预训练数据集版本 (hq)
+        ue_sample_ratio: UE数据采样比例 (0.3表示采样30%的UE数据)
     """
     print("\n" + "="*50)
     print("合并Pretrain数据集")
     print("="*50)
     
     ue_pretrain = PROJECT_ROOT / "dataset" / "ue_pretrain.jsonl"
-    general_pretrain = PROJECT_ROOT / "dataset" / "pretrain_hq.jsonl"
+    
+    # 选择预训练数据集
+    if pretrain_dataset not in PRETRAIN_DATASETS:
+        print(f"[错误] 未知的预训练数据集: {pretrain_dataset}")
+        print(f"可选: {list(PRETRAIN_DATASETS.keys())}")
+        return None
+    
+    general_pretrain = PROJECT_ROOT / "dataset" / PRETRAIN_DATASETS[pretrain_dataset]
     output_file = PROJECT_ROOT / "dataset" / "ue_pretrain_merged.jsonl"
+    
+    print(f"使用预训练数据集: {pretrain_dataset} -> {PRETRAIN_DATASETS[pretrain_dataset]}")
     
     all_data = []
     
@@ -76,15 +99,28 @@ def merge_pretrain_datasets(ue_sample_ratio=0.3):
     return output_file
 
 
-def merge_sft_datasets():
-    """合并SFT数据集"""
+def merge_sft_datasets(sft_dataset='mini'):
+    """
+    合并SFT数据集
+    Args:
+        sft_dataset: SFT数据集版本 (mini, 512, 1024, 2048)
+    """
     print("\n" + "="*50)
     print("合并SFT数据集")
     print("="*50)
     
     ue_sft = PROJECT_ROOT / "dataset" / "ue_sft.jsonl"
-    general_sft = PROJECT_ROOT / "dataset" / "sft_2048.jsonl"
+    
+    # 选择SFT数据集
+    if sft_dataset not in SFT_DATASETS:
+        print(f"[错误] 未知的SFT数据集: {sft_dataset}")
+        print(f"可选: {list(SFT_DATASETS.keys())}")
+        return None
+    
+    general_sft = PROJECT_ROOT / "dataset" / SFT_DATASETS[sft_dataset]
     output_file = PROJECT_ROOT / "dataset" / "ue_sft_merged.jsonl"
+    
+    print(f"使用SFT数据集: {sft_dataset} -> {SFT_DATASETS[sft_dataset]}")
     
     all_data = []
     
@@ -113,7 +149,7 @@ def merge_sft_datasets():
         print(f"  -> {general_count} 条通用对话")
     else:
         print(f"[错误] 通用SFT数据不存在: {general_sft}")
-        print("请先下载 sft_2048.jsonl:")
+        print(f"请先下载 {SFT_DATASETS[sft_dataset]}:")
         print("  https://www.modelscope.cn/datasets/gongjy/minimind_dataset/files")
         return None
     
@@ -140,13 +176,24 @@ def main():
                         help="合并类型")
     parser.add_argument('--ue_ratio', type=float, default=0.3,
                         help="UE预训练数据采样比例 (默认0.3)")
+    parser.add_argument('--sft_dataset', choices=['mini', '512', '1024', '2048'], default='mini',
+                        help="SFT数据集版本: mini=精简版(120万), 512=完整版(680万), 1024=(420万), 2048=(540万)")
+    parser.add_argument('--pretrain_dataset', choices=['hq'], default='hq',
+                        help="预训练数据集版本: hq=高质量(140万)")
     args = parser.parse_args()
     
+    print("\n" + "="*50)
+    print("数据集合并配置")
+    print("="*50)
+    print(f"  Pretrain数据集: {args.pretrain_dataset}")
+    print(f"  SFT数据集: {args.sft_dataset}")
+    print(f"  UE采样比例: {args.ue_ratio}")
+    
     if args.type in ['pretrain', 'all']:
-        merge_pretrain_datasets(args.ue_ratio)
+        merge_pretrain_datasets(args.pretrain_dataset, args.ue_ratio)
     
     if args.type in ['sft', 'all']:
-        merge_sft_datasets()
+        merge_sft_datasets(args.sft_dataset)
     
     print("\n" + "="*50)
     print("✅ 数据合并完成！")

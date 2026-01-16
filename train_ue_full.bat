@@ -12,8 +12,15 @@ SET HIDDEN_SIZE=512
 SET NUM_LAYERS=8
 SET PRETRAIN_EPOCHS=2
 SET SFT_EPOCHS=3
-SET BATCH_SIZE=16
+SET BATCH_SIZE=32
 SET MAX_SEQ_LEN=512
+
+:: SET HIDDEN_SIZE=768
+:: SET NUM_LAYERS=16
+REM SFT数据集选择: mini=精简版(120万条), full=完整版(680万条)
+SET SFT_DATASET=mini
+REM Pretrain数据集选择: hq=高质量(140万条), full=完整版(需下载)
+SET PRETRAIN_DATASET=hq
 REM ===================================================
 
 echo.
@@ -81,7 +88,7 @@ if exist "..\dataset\ue_pretrain_merged.jsonl" (
     echo [跳过] 合并Pretrain数据已存在: dataset\ue_pretrain_merged.jsonl
 ) else (
     echo 合并UE代码 + 通用知识数据...
-    python merge_ue_data.py --type pretrain --ue_ratio 0.3
+    python merge_ue_data.py --type pretrain --ue_ratio 0.3 --pretrain_dataset %PRETRAIN_DATASET%
     if errorlevel 1 (
         echo [错误] 预训练数据合并失败
         pause
@@ -104,9 +111,21 @@ if not exist "..\dataset\ue_sft.jsonl" (
     )
 )
 
-REM 检查通用SFT数据是否存在
-if not exist "..\dataset\sft_mini_512.jsonl" (
-    echo [错误] 缺少通用SFT数据: dataset\sft_mini_512.jsonl
+REM 根据SFT_DATASET选择检查哪个数据集
+if "%SFT_DATASET%"=="mini" (
+    set SFT_FILE=sft_mini_512.jsonl
+) else if "%SFT_DATASET%"=="512" (
+    set SFT_FILE=sft_512.jsonl
+) else if "%SFT_DATASET%"=="1024" (
+    set SFT_FILE=sft_1024.jsonl
+) else (
+    set SFT_FILE=sft_2048.jsonl
+)
+
+echo 使用SFT数据集: %SFT_DATASET% -^> %SFT_FILE%
+
+if not exist "..\dataset\%SFT_FILE%" (
+    echo [错误] 缺少通用SFT数据: dataset\%SFT_FILE%
     echo 请从以下地址下载:
     echo   https://www.modelscope.cn/datasets/gongjy/minimind_dataset/files
     pause
@@ -118,7 +137,7 @@ if exist "..\dataset\ue_sft_merged.jsonl" (
     echo [跳过] 合并SFT数据已存在: dataset\ue_sft_merged.jsonl
 ) else (
     echo 合并UE专业数据 + 通用对话数据...
-    python merge_ue_data.py
+    python merge_ue_data.py --sft_dataset %SFT_DATASET% --pretrain_dataset %PRETRAIN_DATASET%
     if errorlevel 1 (
         echo [错误] 数据合并失败
         pause
