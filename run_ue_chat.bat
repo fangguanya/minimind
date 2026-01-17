@@ -29,6 +29,7 @@ if not exist "out\ue_sft_%HIDDEN_SIZE%.pth" (
 echo 提示: 输入问题后按回车，输入 quit 退出
 echo.
 
-python eval_llm.py --load_from model --weight ue_sft --hidden_size %HIDDEN_SIZE% --num_hidden_layers %NUM_LAYERS%
+::python eval_llm.py --load_from model --weight ue_sft --hidden_size %HIDDEN_SIZE% --num_hidden_layers %NUM_LAYERS%
+python eval_llm.py --load_from model --weight ue_pretrain --hidden_size %HIDDEN_SIZE% --num_hidden_layers %NUM_LAYERS%
 
 pause

@@ -17,10 +17,15 @@ SET MAX_SEQ_LEN=512
 
 :: SET HIDDEN_SIZE=768
 :: SET NUM_LAYERS=16
-REM SFT数据集选择: mini=精简版(120万条), full=完整版(680万条)
+REM SFT数据集选择: mini=精简版(120万条), 512=完整版(680万条)
 SET SFT_DATASET=mini
-REM Pretrain数据集选择: hq=高质量(140万条), full=完整版(需下载)
+REM Pretrain数据集选择: hq=高质量(140万条)
 SET PRETRAIN_DATASET=hq
+REM UE数据权重调整 (解决UE知识被稀释问题)
+REM UE_REPEAT: UE SFT数据重复次数 (建议5-10，让UE占比提高)
+SET UE_REPEAT=5
+REM GENERAL_SAMPLE: 通用数据采样比例 (0.1=10%, 建议0.1-0.3)
+SET GENERAL_SAMPLE=0.2
 REM ===================================================
 
 echo.
@@ -137,7 +142,8 @@ if exist "..\dataset\ue_sft_merged.jsonl" (
     echo [跳过] 合并SFT数据已存在: dataset\ue_sft_merged.jsonl
 ) else (
     echo 合并UE专业数据 + 通用对话数据...
-    python merge_ue_data.py --sft_dataset %SFT_DATASET% --pretrain_dataset %PRETRAIN_DATASET%
+    echo   UE数据重复: %UE_REPEAT%x, 通用数据采样: %GENERAL_SAMPLE%
+    python merge_ue_data.py --sft_dataset %SFT_DATASET% --pretrain_dataset %PRETRAIN_DATASET% --ue_repeat %UE_REPEAT% --general_sample %GENERAL_SAMPLE%
     if errorlevel 1 (
         echo [错误] 数据合并失败
         pause

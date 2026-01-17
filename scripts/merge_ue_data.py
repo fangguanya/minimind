@@ -99,11 +99,13 @@ def merge_pretrain_datasets(pretrain_dataset='hq', ue_sample_ratio=0.3):
     return output_file
 
 
-def merge_sft_datasets(sft_dataset='mini'):
+def merge_sft_datasets(sft_dataset='mini', ue_repeat=1, general_sample_ratio=1.0):
     """
     合并SFT数据集
     Args:
         sft_dataset: SFT数据集版本 (mini, 512, 1024, 2048)
+        ue_repeat: UE数据重复次数 (增加UE数据权重)
+        general_sample_ratio: 通用数据采样比例 (减少通用数据)
     """
     print("\n" + "="*50)
     print("合并SFT数据集")
@@ -121,8 +123,10 @@ def merge_sft_datasets(sft_dataset='mini'):
     output_file = PROJECT_ROOT / "dataset" / "ue_sft_merged.jsonl"
     
     print(f"使用SFT数据集: {sft_dataset} -> {SFT_DATASETS[sft_dataset]}")
+    print(f"UE数据重复: {ue_repeat}x, 通用数据采样: {int(general_sample_ratio*100)}%")
     
     all_data = []
+    ue_data = []
     
     # 1. 加载UE SFT数据
     if ue_sft.exists():
@@ -130,23 +134,34 @@ def merge_sft_datasets(sft_dataset='mini'):
         with open(ue_sft, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
-                    all_data.append(json.loads(line))
-        print(f"  -> {len(all_data)} 条UE问答")
+                    ue_data.append(json.loads(line))
+        print(f"  -> {len(ue_data)} 条UE问答")
+        
+        # 重复UE数据以增加权重
+        for _ in range(ue_repeat):
+            all_data.extend(ue_data)
+        print(f"  -> 重复 {ue_repeat}x 后共 {len(all_data)} 条")
     else:
         print(f"[警告] UE SFT数据不存在: {ue_sft}")
     
     ue_count = len(all_data)
     
-    # 2. 加载通用SFT数据
+    # 2. 加载通用SFT数据 (可采样)
     if general_sft.exists():
         print(f"加载通用SFT数据: {general_sft}")
-        general_count = 0
+        general_data = []
         with open(general_sft, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
-                    all_data.append(json.loads(line))
-                    general_count += 1
-        print(f"  -> {general_count} 条通用对话")
+                    general_data.append(json.loads(line))
+        
+        # 采样通用数据
+        if general_sample_ratio < 1.0:
+            sample_size = int(len(general_data) * general_sample_ratio)
+            general_data = random.sample(general_data, sample_size)
+        
+        all_data.extend(general_data)
+        print(f"  -> {len(general_data)} 条通用对话 (采样 {int(general_sample_ratio*100)}%)")
     else:
         print(f"[错误] 通用SFT数据不存在: {general_sft}")
         print(f"请先下载 {SFT_DATASETS[sft_dataset]}:")
@@ -180,6 +195,10 @@ def main():
                         help="SFT数据集版本: mini=精简版(120万), 512=完整版(680万), 1024=(420万), 2048=(540万)")
     parser.add_argument('--pretrain_dataset', choices=['hq'], default='hq',
                         help="预训练数据集版本: hq=高质量(140万)")
+    parser.add_argument('--ue_repeat', type=int, default=1,
+                        help="UE SFT数据重复次数 (增加UE数据权重, 默认1)")
+    parser.add_argument('--general_sample', type=float, default=1.0,
+                        help="通用SFT数据采样比例 (0.1=10%%, 默认1.0=100%%)")
     args = parser.parse_args()
     
     print("\n" + "="*50)
@@ -187,13 +206,15 @@ def main():
     print("="*50)
     print(f"  Pretrain数据集: {args.pretrain_dataset}")
     print(f"  SFT数据集: {args.sft_dataset}")
-    print(f"  UE采样比例: {args.ue_ratio}")
+    print(f"  UE Pretrain采样: {args.ue_ratio}")
+    print(f"  UE SFT重复: {args.ue_repeat}x")
+    print(f"  通用SFT采样: {int(args.general_sample*100)}%")
     
     if args.type in ['pretrain', 'all']:
         merge_pretrain_datasets(args.pretrain_dataset, args.ue_ratio)
     
     if args.type in ['sft', 'all']:
-        merge_sft_datasets(args.sft_dataset)
+        merge_sft_datasets(args.sft_dataset, args.ue_repeat, args.general_sample)
     
     print("\n" + "="*50)
     print("✅ 数据合并完成！")
