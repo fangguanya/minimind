@@ -7,7 +7,7 @@ import sys
 import time
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
 
@@ -74,8 +74,8 @@ def train():
     
     # ========== 优化器和混合精度 ==========
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
-    scaler = GradScaler()
-    autocast_ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
+    scaler = GradScaler('cuda')
+    autocast_ctx = autocast('cuda', dtype=torch.bfloat16)
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     
     total_steps = epochs * len(train_loader)
@@ -122,9 +122,9 @@ def train():
                 elapsed = time.time() - start_time
                 eta = elapsed / (step + 1) * len(train_loader) - elapsed
                 print(f"Epoch {epoch+1}/{epochs} Step {step+1}/{len(train_loader)} "
-                      f"Loss: {loss.item():.4f} LR: {lr:.6f} ETA: {eta/60:.1f}min")
+                      f"Loss: {loss.item():.4f} LR: {lr:.6f} ETA: {eta/60:.1f}min", flush=True)
         
-        print(f"Epoch {epoch+1} 完成, 耗时: {(time.time()-start_time)/60:.1f}min")
+        print(f"Epoch {epoch+1} 完成, 耗时: {(time.time()-start_time)/60:.1f}min", flush=True)
     
     # ========== 保存模型 ==========
     print(f"\n保存模型到 {save_path}...")
